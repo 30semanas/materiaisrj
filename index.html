@@ -1153,6 +1153,163 @@ window.__esc=function(id){if(_map)_map.closePopup();setTimeout(function(){painel
 // ── INIT ───────────────────────────────────────────────────
 loadLS();
 nav('escolas');
+
+// ============================================================
+// SINCRONIZAÇÃO COM GOOGLE SHEETS
+// ============================================================
+const SHEETS_API = 'https://script.google.com/macros/s/AKfycbzoyw0mzrGwzmVGhnxSgNeC87HjYl1r7VTAQYw9Tc-quSfv4MXrkT9IlwPvRnB2XC2YzQ/exec';
+var _syncTimer = null;
+var _syncPending = false;
+var _sheetsOk = false;
+
+// Chama API do Sheets
+async function sheetsCall(action, body) {
+  var url = SHEETS_API + '?action=' + encodeURIComponent(action);
+  var resp = await fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(Object.assign({action:action}, body||{})),
+    signal: AbortSignal.timeout(30000)
+  });
+  var json = await resp.json();
+  if (!json.ok) throw new Error(json.error || 'Erro Sheets');
+  return json.data;
+}
+
+// Salva estado completo no Sheets (debounced 3s)
+function scheduleSave() {
+  _syncPending = true;
+  clearTimeout(_syncTimer);
+  _syncTimer = setTimeout(function(){ syncToSheets(false); }, 3000);
+}
+
+async function syncToSheets(showMsg) {
+  if (!_sheetsOk) return; // não tenta se Sheets nunca respondeu
+  _syncPending = false;
+  var state = buildState();
+  try {
+    await sheetsCall('save_state', {state: state});
+    if (showMsg) toast('💾 Salvo no Google Sheets!', 'ok');
+    updateSyncIcon('ok');
+  } catch(e) {
+    if (showMsg) toast('Erro ao salvar: ' + e.message, 'err');
+    updateSyncIcon('err');
+  }
+}
+
+function buildState() {
+  return {
+    parceiros:      S.parceiros,
+    estoque:        S.estoque,
+    recebimentos:   S.recebimentos,
+    transferencias: S.transferencias,
+    materiais:      S.materiais,
+    planejamentos:  S.planejamentos,
+    patch:          S.escolas.map(function(e){ return {id:e.id, parceiro_id:e.parceiro_id||'', parceiro_nome:e.parceiro_nome||''}; })
+  };
+}
+
+// Carrega estado do Sheets na inicialização
+async function loadFromSheets() {
+  try {
+    // Primeiro inicializa as abas
+    await sheetsCall('init', {});
+    _sheetsOk = true;
+    updateSyncIcon('loading');
+
+    var data = await sheetsCall('load_state', {});
+
+    // Aplica dados do Sheets (sobrescreve localStorage com dados do servidor)
+    if (data.parceiros && data.parceiros.length > 0)
+      S.parceiros = data.parceiros;
+
+    if (data.estoque && data.estoque.length > 0)
+      S.estoque = data.estoque.map(function(e){
+        return Object.assign(e, {quantidade: parseFloat(e.quantidade||0), valor_medio: parseFloat(e.valor_medio||0)});
+      });
+
+    if (data.recebimentos && data.recebimentos.length > 0)
+      S.recebimentos = data.recebimentos;
+
+    if (data.transferencias && data.transferencias.length > 0)
+      S.transferencias = data.transferencias;
+
+    if (data.materiais && data.materiais.length > 0)
+      S.materiais = data.materiais.map(function(m){
+        return Object.assign(m, {valor_medio: parseFloat(m.valor_medio||0)});
+      });
+
+    if (data.planejamentos && data.planejamentos.length > 0)
+      S.planejamentos = data.planejamentos.map(function(p){
+        return Object.assign(p, {quantidade_prevista: parseFloat(p.quantidade_prevista||0), quantidade_consumida: parseFloat(p.quantidade_consumida||0)});
+      });
+
+    // Aplica patches de parceiro nas escolas
+    if (data.patch && data.patch.length > 0) {
+      data.patch.forEach(function(p){
+        var e = S.escolas.find(function(x){ return x.id === p.id; });
+        if (e) {
+          e.parceiro_id   = p.parceiro_id   || null;
+          e.parceiro_nome = p.parceiro_nome  || null;
+        }
+      });
+    }
+
+    // Atualiza localStorage com dados frescos
+    saveLS();
+    updateSyncIcon('ok');
+    toast('☁️ Dados carregados do Google Sheets', 'info', 3000);
+
+    // Recarrega a página atual para mostrar dados atualizados
+    if (typeof pages[currentPage] === 'function') pages[currentPage]();
+
+  } catch(e) {
+    _sheetsOk = false;
+    updateSyncIcon('off');
+    // Silencioso — continua com localStorage
+    console.warn('Sheets indisponível, usando dados locais:', e.message);
+  }
+}
+
+var _currentPage = '';
+function updateSyncIcon(status) {
+  var el = document.getElementById('sync-icon');
+  if (!el) return;
+  var icons = {ok:'☁️', err:'⚠️', loading:'🔄', off:'📴'};
+  var titles = {ok:'Sincronizado com Google Sheets', err:'Erro de sincronização', loading:'Sincronizando...', off:'Offline (dados locais)'};
+  el.textContent = icons[status] || '☁️';
+  el.title = titles[status] || '';
+}
+
+// Sobrescreve saveLS para também disparar sync
+var _origSaveLS = saveLS;
+saveLS = function() {
+  _origSaveLS();
+  scheduleSave();
+};
+
+// Botão de sync manual na sidebar-footer
+var sfEl = document.querySelector('.sidebar-footer');
+if (sfEl) {
+  var syncBtn = document.createElement('button');
+  syncBtn.className = 'btn-ghost btn-sm';
+  syncBtn.id = 'sync-icon';
+  syncBtn.textContent = '📴';
+  syncBtn.title = 'Sincronizar com Google Sheets';
+  syncBtn.onclick = function() { syncToSheets(true); };
+  sfEl.insertBefore(syncBtn, sfEl.firstChild);
+}
+
+var currentPage = 'escolas';
+var _origNav = nav;
+nav = function(page) {
+  currentPage = page;
+  _origNav(page);
+};
+
+// Inicia carregamento do Sheets em background
+loadFromSheets();
+
 </script>
 </body>
 </html>
